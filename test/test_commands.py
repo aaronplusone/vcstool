@@ -14,6 +14,7 @@ file_uri_scheme = 'file://' if sys.platform != 'win32' else 'file:///'
 REPOS_FILE = os.path.join(os.path.dirname(__file__), 'list.repos')
 REPOS_FILE_URL = file_uri_scheme + REPOS_FILE
 REPOS2_FILE = os.path.join(os.path.dirname(__file__), 'list2.repos')
+SPARSE_REPOS_FILE = os.path.join(os.path.dirname(__file__), 'sparse.repos')
 TEST_WORKSPACE = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), 'test_workspace')
 
@@ -27,6 +28,7 @@ if svn:
         subprocess.check_call([svn, '--version'])
     except subprocess.CalledProcessError:
         svn = False
+sparse_git = GitClient.get_git_version() >= [2, 25, 0]
 
 
 class TestCommands(unittest.TestCase):
@@ -97,6 +99,43 @@ class TestCommands(unittest.TestCase):
             subfolder='immutable')
         expected = get_expected_output('export_exact')
         self.assertEqual(output, expected)
+
+    @unittest.skipIf(not sparse_git, '`git` >= 2.25 required for sparse git')
+    def test_import_sparse(self):
+        workdir = os.path.join(TEST_WORKSPACE, 'import-sparse')
+        os.makedirs(workdir)
+        try:
+            output = run_command(
+                'import', ['--input', SPARSE_REPOS_FILE, '.'],
+                subfolder='import-sparse')
+            # the actual output contains absolute paths
+            output = output.replace(
+                b'repository in ' + workdir.encode() + b'/',
+                b'repository in ./')
+            expected = get_expected_output('import_sparse')
+            assert (output == expected)
+
+            # directories match sparse-checkout list
+            repos = next(os.walk(workdir))[1]
+            for repo in repos:
+                git_dir = os.path.join(workdir, repo, '.git')
+                cmd = ['git', '--git-dir={}'.format(git_dir),
+                       'sparse-checkout', 'list']
+                output = subprocess.check_output(
+                    cmd, stderr=subprocess.STDOUT,
+                    cwd=os.path.join(workdir, repo))
+
+                git_patterns = [pattern.decode('utf-8') for pattern in
+                                output.splitlines()]
+                local_directories = next(
+                    os.walk(os.path.join(workdir, repo)))[1]
+                local_directories.remove('.git')
+
+                self.assertEqual(git_patterns, local_directories,
+                                 "Local directories do not match sparse "
+                                 "pattern for {}".format(repo))
+        finally:
+            rmtree(workdir)
 
     def test_log(self):
         output = run_command(
@@ -283,10 +322,14 @@ invocation.
                 b'repository in ' + workdir.encode() + b'/',
                 b'repository in ./')
             expected = get_expected_output('import_shallow')
+            # git 2.28+ gives hints if no default branch is specified
+            expected_2_28 = get_expected_output(
+                'import_shallow_default_branch_hints')
             # newer git versions don't append ... after the commit hash
             assert (
                 output == expected or
-                output == expected.replace(b'... ', b' '))
+                output == expected.replace(b'... ', b' ') or
+                output == expected_2_28)
 
             # check that repository history has only one commit
             output = subprocess.check_output(
